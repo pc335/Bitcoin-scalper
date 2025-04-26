@@ -56,5 +56,7 @@ Over time, the agent learns which actions to take to maximize profits based on o
 
 We also use a decaying epsilon strategy to balance exploration and exploitation during training.
 
-
+This project is currently under active development.  
+- The class definitions will be cleaned up and refactored for better structure.
+- Inference functionality will be added, integrating the trained model weights with a Flask backend.
 
