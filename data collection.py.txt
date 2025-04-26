@@ -1,0 +1,160 @@
+import asyncio
+import json
+import websockets
+import pandas as pd
+from datetime import datetime
+import aiofiles
+
+class KrakenCSVLogger:
+    def __init__(self, symbol='XBT/USD', filename='market_data.csv'):
+        self.symbol = symbol
+        self.filename = filename
+        self.bids = []
+        self.asks = []
+        self.ltp = None
+        self.prev_ltp = None
+        self._running = False
+        self._lock = asyncio.Lock()
+        self.trade_time = None
+        self.trade_side = None
+        self.header_written = False
+
+    async def _websocket_task(self):
+        async with websockets.connect("wss://ws.kraken.com") as ws:
+            await ws.send(json.dumps({
+                "event": "subscribe",
+                "pair": [self.symbol],
+                "subscription": {"name": "book", "depth": 10}
+            }))
+            await ws.send(json.dumps({
+                "event": "subscribe",
+                "pair": [self.symbol],
+                "subscription": {"name": "trade"}
+            }))
+
+            while self._running:
+                try:
+                    message = await asyncio.wait_for(ws.recv(), timeout=1)
+                    await self._handle_message(message)
+                except (asyncio.TimeoutError, websockets.ConnectionClosed):
+                    if self._running:
+                        continue
+                    break
+
+    async def _handle_message(self, message):
+        try:
+            data = json.loads(message)
+            
+            if isinstance(data, dict) and data.get('event') == 'subscriptionStatus':
+                return
+                
+            if isinstance(data, list):
+                async with self._lock:
+                    if 'as' in data[1] or 'bs' in data[1]:
+                        self._process_snapshot(data[1])
+                    elif 'a' in data[1] or 'b' in data[1]:
+                        self._process_update(data[1])
+                    elif isinstance(data[1], list):
+                        trade_data = data[1][-1]
+                        new_ltp = float(trade_data[0])
+                        
+                        # Only update if LTP changes
+                        if new_ltp != self.ltp:
+                            self.prev_ltp = self.ltp
+                            self.ltp = new_ltp
+                            self.trade_time = float(trade_data[2])
+                            self.trade_side = 'buy' if trade_data[3] == 'b' else 'sell'
+                        
+        except Exception as e:
+            print(f"Error: {e}")
+
+    def _process_snapshot(self, data):
+        if 'as' in data:
+            self.asks = [[float(p), float(v)] for p, v, *_ in data['as']]
+        if 'bs' in data:
+            self.bids = [[float(p), float(v)] for p, v, *_ in data['bs']]
+
+    def _process_update(self, data):
+        if 'a' in data:
+            for entry in data['a']:
+                self._update_side('asks', float(entry[0]), float(entry[1]))
+        if 'b' in data:
+            for entry in data['b']:
+                self._update_side('bids', float(entry[0]), float(entry[1]))
+
+    def _update_side(self, side, price, volume):
+        target = self.asks if side == 'asks' else self.bids
+        found = next((i for i, x in enumerate(target) if x[0] == price), None)
+        
+        if volume == 0 and found is not None:
+            del target[found]
+        elif volume > 0:
+            if found is not None:
+                target[found][1] = volume
+            else:
+                target.append([price, volume])
+                target.sort(reverse=(side == 'bids'), key=lambda x: x[0])
+                if len(target) > 10:
+                    del target[10:]
+
+    async def _csv_writer(self):
+        while self._running:
+            async with self._lock:
+                if self.ltp == self.prev_ltp or self.ltp is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                
+                timestamp = datetime.utcnow().isoformat()
+                record = {
+                    'timestamp': timestamp,
+                    'bid1_price': self.bids[0][0] if len(self.bids) > 0 else None,
+                    'bid1_vol': self.bids[0][1] if len(self.bids) > 0 else None,
+                    'bid2_price': self.bids[1][0] if len(self.bids) > 1 else None,
+                    'bid2_vol': self.bids[1][1] if len(self.bids) > 1 else None,
+                    'bid3_price': self.bids[2][0] if len(self.bids) > 2 else None,
+                    'bid3_vol': self.bids[2][1] if len(self.bids) > 2 else None,
+                    'bid4_price': self.bids[3][0] if len(self.bids) > 3 else None,
+                    'bid4_vol': self.bids[3][1] if len(self.bids) > 3 else None,
+                    'bid5_price': self.bids[4][0] if len(self.bids) > 4 else None,
+                    'bid5_vol': self.bids[4][1] if len(self.bids) > 4 else None,
+                    'ask1_price': self.asks[0][0] if len(self.asks) > 0 else None,
+                    'ask1_vol': self.asks[0][1] if len(self.asks) > 0 else None,
+                    'ask2_price': self.asks[1][0] if len(self.asks) > 1 else None,
+                    'ask2_vol': self.asks[1][1] if len(self.asks) > 1 else None,
+                    'ask3_price': self.asks[2][0] if len(self.asks) > 2 else None,
+                    'ask3_vol': self.asks[2][1] if len(self.asks) > 2 else None,
+                    'ask4_price': self.asks[3][0] if len(self.asks) > 3 else None,
+                    'ask4_vol': self.asks[3][1] if len(self.asks) > 3 else None,
+                    'ask5_price': self.asks[4][0] if len(self.asks) > 4 else None,
+                    'ask5_vol': self.asks[4][1] if len(self.asks) > 4 else None,
+                    'ltp': self.ltp,
+                    'trade_time': self.trade_time,
+                    'trade_side': self.trade_side
+                }
+
+            try:
+                async with aiofiles.open(self.filename, mode='a') as f:
+                    if not self.header_written:
+                        await f.write(','.join(record.keys()) + '\n')
+                        self.header_written = True
+                    await f.write(','.join(map(str, record.values())) + '\n')
+            except Exception as e:
+                print(f"Write error: {e}")
+
+            await asyncio.sleep(0.001)  # 1ms delay between writes
+
+    async def start(self):
+        self._running = True
+        await asyncio.gather(
+            self._websocket_task(),
+            self._csv_writer()
+        )
+
+    async def stop(self):
+        self._running = False
+
+
+logger = KrakenCSVLogger()
+
+async def run_logger():
+    await logger.start()

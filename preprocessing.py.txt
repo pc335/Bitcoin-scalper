@@ -1,0 +1,55 @@
+csv_path = "C:/Users/Lenovo/market_data3.csv"
+df=pd.read_csv(csv_path)
+print(df)
+print(df.columns)
+print(len(df.columns))
+def preprocess_data(df):
+    index=df.columns
+    print(index)
+    
+    mdr=df[['bid1_vol', 'bid2_vol', 'bid3_vol', 'bid4_vol', 'bid5_vol']].sum(axis=1)/df[['ask1_vol', 'ask2_vol', 'ask3_vol', 'ask4_vol', 'ask5_vol']].sum(axis=1)
+    mdrsig=mdr.apply(lambda x:1 if x>1 else -1)
+    cum_mdr=mdr+mdr.shift(1).fillna(0)
+    cum_mdrsig=cum_mdr.apply(lambda x:1 if x>1 else -1)
+    ofi=(df['bid1_vol']-df['bid1_vol'].shift(1).fillna(0))-(df['ask1_vol']-df['ask1_vol'].shift(1).fillna(0))
+    ofi_signal = ofi.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    indexvmp=['bid1_price','bid1_vol','ask1_price','ask1_vol']
+    vqmp=((df[indexvmp[0]]*df[indexvmp[3]])+(df[indexvmp[2]]*df[indexvmp[1]]))/(df[indexvmp[3]]+df[indexvmp[1]])
+    delta=df['trade_time']-df['trade_time'].shift(1).fillna(0)
+    
+    high_volaitility=((delta!=0)& (delta<10)).map({True:1,False:-1})
+    spread=df['ask1_price']-df['bid1_price']
+    index=['spread','mdr','cum-mdr','ofi','vqmp','delta','high volaitility']
+    content=[ spread,mdrsig,cum_mdrsig,ofi_signal,vqmp,delta,high_volaitility]
+    contents={heading:con for heading,con in zip(index,content)}
+    
+    new_df=pd.DataFrame(contents)
+    updated_df=pd.concat([df,new_df],axis=1)
+    cols_to_drop = ['bid2_price', 'bid3_price', 'bid4_price', 'bid5_price', 
+                    'bid2_vol', 'bid3_vol', 'bid4_vol', 'bid5_vol', 'ask2_vol', 
+                    'ask3_vol', 'ask4_vol', 'ask5_vol', 'ask2_price', 'ask3_price', 'ask4_price',
+                    'ask5_price', 'bid2_price', 'bid3_price', 'bid4_price', 'bid5_price', 'trade_time','timestamp']
+
+    updated_df.drop(columns=cols_to_drop, inplace=True)
+    return updated_df
+updated_df=preprocess_data(df)
+def chunkate(df,chunklegnth):
+    
+    array_s=df.values
+    norm_price=[array_s[0,0]-2]
+    rest=[0 for i in range(12)]
+    rest_8=array_s[0,0]-2
+    normalize=np.array(norm_price+rest).reshape(1,-1)
+    normalized_array=array_s-normalize
+    
+    chunks=math.floor(normalized_array.shape[0]/chunklegnth)
+    extra=normalized_array.shape[0]-chunks*chunklegnth
+    list_chunk=[]
+    for ind in range(chunks):
+        start_index=ind*chunklegnth
+        end_index=(ind+1)*chunklegnth
+        list_chunk.append( normalized_array[start_index:end_index])
+
+    if extra !=0:
+        list_chunk.append( normalized_array[end_index:end_index+extra])
+    return list_chunk
